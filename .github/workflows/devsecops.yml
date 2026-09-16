@@ -1,0 +1,398 @@
+# =============================================================================
+#  PIPELINE DEVSECOPS - LABORATORIO EDUCACIONAL
+#
+#  Este arquivo ensina o GitHub a rodar 4 ferramentas de seguranca, em ordem,
+#  toda vez que o codigo muda:
+#
+#    1. SAST   - SpotBugs + FindSecBugs  -> le o NOSSO codigo
+#    2. SCA    - Syft + Grype            -> le as BIBLIOTECAS de terceiros
+#    3. K8s    - Kubescape               -> le os MANIFESTOS do Kubernetes
+#    4. DAST   - Wapiti                  -> ataca a APLICACAO RODANDO
+#    5. Resumo - junta tudo em uma tabela
+#
+#  MODO RELATORIO: nenhum estagio derruba o pipeline. Mesmo achando falha
+#  critica, ele segue ate o fim para que todos os relatorios sejam gerados.
+#  (Em um projeto real voce faria o contrario: bloquearia o deploy.)
+# =============================================================================
+
+name: Pipeline DevSecOps
+
+# QUANDO este pipeline roda:
+on:
+  push:
+    branches: [ main ]          # a cada envio de codigo para a branch main
+  pull_request:
+    branches: [ main ]          # a cada pedido de revisao de codigo
+  workflow_dispatch:            # e pelo botao "Run workflow" (usado na demo)
+
+# Permissoes minimas: o pipeline so precisa ler o codigo.
+permissions:
+  contents: read
+
+jobs:
+
+  # ===========================================================================
+  # ESTAGIO 1 de 4 - SAST (Static Application Security Testing)
+  # ---------------------------------------------------------------------------
+  # Analogia: e o revisor que le a receita do bolo e aponta os erros ANTES de
+  # acender o forno. Nada e executado, so lido.
+  #
+  # SpotBugs    = ferramenta que procura bugs no codigo Java compilado.
+  # FindSecBugs = pacote de ~140 regras de SEGURANCA que ensina o SpotBugs a
+  #               reconhecer SQL Injection, XSS, senha no codigo, MD5 etc.
+  # ===========================================================================
+  sast-spotbugs:
+    name: "1 - SAST - SpotBugs + FindSecBugs (analisa nosso codigo)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar o Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Compilar a aplicacao
+        run: mvn -B clean compile
+
+      - name: Rodar o SpotBugs com as regras do FindSecBugs
+        continue-on-error: true      # modo relatorio: nao derruba o pipeline
+        run: mvn -B spotbugs:spotbugs
+
+      - name: Montar o resumo dos achados
+        if: always()
+        run: |
+          ARQUIVO=target/spotbugsXml.xml
+
+          echo "## Estagio 1 - SAST (SpotBugs + FindSecBugs)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f "$ARQUIVO" ]; then
+            echo "Relatorio nao gerado. Verifique o log do passo anterior." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          TOTAL=$(grep -o "<BugInstance" "$ARQUIVO" | wc -l)
+          echo "**Total de problemas encontrados no nosso codigo: ${TOTAL}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Regra acionada | Quantidade |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+
+          # O relatorio do SpotBugs usa aspas SIMPLES: type='SQL_INJECTION_JDBC'
+          grep -oE "<BugInstance[^>]*type='[A-Z_0-9]+'" "$ARQUIVO" | grep -oE "type='[A-Z_0-9]+'" | tr -d "'" | sed 's/type=//' | sort | uniq -c | sort -rn \
+            | awk '{ print "| " $2 " | " $1 " |" }' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Baixe o artefato **relatorio-1-sast** para ver o HTML com a linha exata de cada falha." >> $GITHUB_STEP_SUMMARY
+
+          echo "===== ACHADOS DO SAST (tambem visiveis aqui no log) ====="
+          grep -oE "<BugInstance[^>]*type='[A-Z_0-9]+'" "$ARQUIVO" | grep -oE "type='[A-Z_0-9]+'" | tr -d "'" | sed 's/type=//' | sort | uniq -c | sort -rn
+
+      - name: Guardar o relatorio do SAST
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-1-sast
+          path: |
+            target/spotbugsXml.xml
+            target/site/spotbugs.html
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # ESTAGIO 2 de 4 - SCA (Software Composition Analysis)
+  # ---------------------------------------------------------------------------
+  # Analogia: e a conferencia dos INGREDIENTES comprados prontos. Voce nao
+  # escreveu essas bibliotecas, mas se uma delas estiver estragada, o bolo
+  # (sua aplicacao) fica contaminado do mesmo jeito.
+  #
+  # Syft  = monta a lista de ingredientes (SBOM - Software Bill of Materials).
+  # Grype = pega essa lista e compara com o banco publico de falhas (CVEs).
+  # ===========================================================================
+  sca-syft-grype:
+    name: "2 - SCA - Syft + Grype (analisa as bibliotecas)"
+    runs-on: ubuntu-latest
+    needs: sast-spotbugs
+    if: always()
+
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Construir a imagem Docker
+        run: docker build -t app-vulneravel:latest .
+
+      - name: Instalar o Syft e o Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          syft version
+          grype version
+
+      - name: Syft - montar a lista de ingredientes (SBOM)
+        continue-on-error: true
+        run: |
+          mkdir -p relatorios
+          echo "===== O QUE EXISTE DENTRO DA IMAGEM (primeiras 60 linhas) ====="
+          syft app-vulneravel:latest -o table | head -60
+          syft app-vulneravel:latest -o cyclonedx-json > relatorios/sbom.cyclonedx.json
+          syft app-vulneravel:latest -o table       > relatorios/sbom-lista.txt
+          echo "Total de componentes inventariados: $(grep -c '"name"' relatorios/sbom.cyclonedx.json || true)"
+
+      - name: Grype - procurar falhas conhecidas (CVEs)
+        continue-on-error: true
+        run: |
+          echo "===== FALHAS ENCONTRADAS NAS BIBLIOTECAS ====="
+          grype sbom:relatorios/sbom.cyclonedx.json -o table | tee relatorios/grype-resultado.txt
+          grype sbom:relatorios/sbom.cyclonedx.json -o json  > relatorios/grype-resultado.json
+
+      - name: Montar o resumo dos achados
+        if: always()
+        run: |
+          echo "## Estagio 2 - SCA (Syft + Grype)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f relatorios/grype-resultado.txt ]; then
+            echo "Relatorio nao gerado. Verifique o log do passo anterior." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "| Gravidade | Quantidade |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          for NIVEL in Critical High Medium Low Negligible; do
+            # A coluna da gravidade muda de posicao entre versoes do Grype,
+            # entao procuramos a palavra exata em qualquer coluna da linha.
+            QTD=$(awk -v n="$NIVEL" '{ for (i = 1; i <= NF; i++) if ($i == n) { total++; break } } END { print total + 0 }' relatorios/grype-resultado.txt)
+            echo "| ${NIVEL} | ${QTD} |" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Falhas criticas (as 15 primeiras)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          awk '{ for (i = 1; i <= NF; i++) if ($i == "Critical") { print; break } }' relatorios/grype-resultado.txt | head -15 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Baixe o artefato **relatorio-2-sca** para ver a lista completa." >> $GITHUB_STEP_SUMMARY
+
+      - name: Guardar os relatorios do SCA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-2-sca
+          path: relatorios/
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # ESTAGIO 3 de 4 - SEGURANCA DE KUBERNETES
+  # ---------------------------------------------------------------------------
+  # Analogia: e a vistoria da COZINHA onde o bolo vai ser feito. O codigo pode
+  # estar perfeito, mas se a cozinha tem botijao de gas vazando (container
+  # rodando como root, sem limite de memoria), o risco continua enorme.
+  #
+  # Kubescape = le os arquivos YAML do Kubernetes e compara com frameworks de
+  #             boas praticas, como o da NSA/CISA.
+  # ===========================================================================
+  k8s-kubescape:
+    name: "3 - K8s - Kubescape (analisa os manifestos do Kubernetes)"
+    runs-on: ubuntu-latest
+    needs: sca-syft-grype
+    if: always()
+
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar o Kubescape
+        run: |
+          curl -s https://raw.githubusercontent.com/kubescape/kubescape/master/install.sh | /bin/bash
+          # Dependendo da versao, o instalador coloca o programa em
+          # /usr/local/bin (ja visivel) ou em ~/.kubescape/bin. Cobrimos os dois.
+          echo "$HOME/.kubescape/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.kubescape/bin:$PATH"
+          kubescape version
+
+      - name: Kubescape - vistoriar os manifestos
+        continue-on-error: true
+        run: |
+          mkdir -p relatorios
+          echo "===== RESULTADO DA VISTORIA (framework NSA) ====="
+          kubescape scan framework nsa k8s/ \
+            --format pretty-printer \
+            --verbose \
+            | tee relatorios/kubescape-resultado.txt
+
+          kubescape scan framework nsa k8s/ \
+            --format json \
+            --output relatorios/kubescape-resultado.json
+
+      - name: Montar o resumo dos achados
+        if: always()
+        run: |
+          echo "## Estagio 3 - Kubernetes (Kubescape)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f relatorios/kubescape-resultado.txt ]; then
+            echo "Relatorio nao gerado. Verifique o log do passo anterior." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "### Controles que FALHARAM e nota de conformidade" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Copia a tabela inteira que o Kubescape desenhou, a partir do titulo
+          sed -n '/Framework scanned/,$p' relatorios/kubescape-resultado.txt \
+            | head -60 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Baixe o artefato **relatorio-3-kubernetes** para ver a tabela completa." >> $GITHUB_STEP_SUMMARY
+
+      - name: Guardar os relatorios do Kubescape
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-3-kubernetes
+          path: relatorios/
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # ESTAGIO 4 de 4 - DAST (Dynamic Application Security Testing)
+  # ---------------------------------------------------------------------------
+  # Analogia: aqui o bolo ja esta pronto e o inspetor vai PROVAR. O Wapiti nao
+  # olha o codigo: ele navega no site, preenche formularios e manda ataques de
+  # verdade, observando como a aplicacao responde.
+  # ===========================================================================
+  dast-wapiti:
+    name: "4 - DAST - Wapiti (ataca a aplicacao rodando)"
+    runs-on: ubuntu-latest
+    needs: k8s-kubescape
+    if: always()
+
+    steps:
+      - name: Baixar o codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Construir a imagem Docker da aplicacao
+        run: docker build -t app-vulneravel:latest .
+
+      - name: Subir a aplicacao em um container
+        run: |
+          docker run -d --name alvo -p 8080:8080 app-vulneravel:latest
+          echo "Aguardando a aplicacao responder..."
+          for TENTATIVA in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/ > /dev/null 2>&1; then
+              echo "Aplicacao no ar apos ${TENTATIVA} tentativas."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "A aplicacao nao subiu a tempo. Logs do container:"
+          docker logs alvo
+          exit 1
+
+      - name: Instalar o Wapiti
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet wapiti3
+          wapiti --version
+
+      - name: Wapiti - atacar a aplicacao
+        continue-on-error: true
+        run: |
+          mkdir -p relatorios
+          wapiti \
+            --url http://127.0.0.1:8080/ \
+            --scope folder \
+            --module sql,xss,exec,file,backup,csp,http_headers \
+            --format html \
+            --output relatorios/wapiti \
+            --max-scan-time 240 \
+            --flush-session \
+            --verbose 1 \
+            | tee relatorios/wapiti-log.txt
+
+      - name: Mostrar os ataques chegando na aplicacao
+        if: always()
+        run: |
+          echo "===== LOG DA APLICACAO: as requisicoes de ataque do Wapiti ====="
+          docker logs alvo 2>&1 | tail -40
+
+      - name: Montar o resumo dos achados
+        if: always()
+        run: |
+          echo "## Estagio 4 - DAST (Wapiti)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f relatorios/wapiti-log.txt ]; then
+            echo "Relatorio nao gerado. Verifique o log do passo anterior." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "### Vulnerabilidades confirmadas na aplicacao rodando" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -iE "vulnerabilit|injection|cross site|command execution|traversal|htaccess" \
+            relatorios/wapiti-log.txt | head -25 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Baixe o artefato **relatorio-4-dast** e abra o arquivo .html no navegador." >> $GITHUB_STEP_SUMMARY
+
+      - name: Guardar o relatorio do Wapiti
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-4-dast
+          path: relatorios/
+          if-no-files-found: warn
+
+      - name: Desligar a aplicacao
+        if: always()
+        run: docker rm -f alvo || true
+
+  # ===========================================================================
+  # RESUMO FINAL - junta os 4 estagios em uma unica tabela
+  # ===========================================================================
+  resumo:
+    name: "5 - Resumo final do pipeline"
+    runs-on: ubuntu-latest
+    needs: [sast-spotbugs, sca-syft-grype, k8s-kubescape, dast-wapiti]
+    if: always()
+
+    steps:
+      - name: Baixar todos os relatorios gerados
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: todos-relatorios
+
+      - name: Escrever a tabela final
+        run: |
+          {
+            echo "# Resultado do Pipeline DevSecOps"
+            echo ""
+            echo "| # | Estagio | Ferramenta | O que ela examina | Situacao |"
+            echo "|---|---------|------------|-------------------|----------|"
+            echo "| 1 | SAST | SpotBugs + FindSecBugs | O codigo-fonte que NOS escrevemos | ${{ needs.sast-spotbugs.result }} |"
+            echo "| 2 | SCA | Syft + Grype | As bibliotecas de TERCEIROS | ${{ needs.sca-syft-grype.result }} |"
+            echo "| 3 | K8s | Kubescape | Os manifestos do Kubernetes | ${{ needs.k8s-kubescape.result }} |"
+            echo "| 4 | DAST | Wapiti | A aplicacao RODANDO | ${{ needs.dast-wapiti.result }} |"
+            echo ""
+            echo "## Relatorios disponiveis para download"
+            echo ""
+            echo "Role esta pagina ate o final e procure a secao **Artifacts**:"
+            echo ""
+            echo "- relatorio-1-sast - abra o arquivo spotbugs.html"
+            echo "- relatorio-2-sca - abra o arquivo grype-resultado.txt"
+            echo "- relatorio-3-kubernetes - abra o arquivo kubescape-resultado.txt"
+            echo "- relatorio-4-dast - abra o arquivo .html dentro da pasta wapiti/"
+            echo ""
+            echo "> Lembrete: este pipeline roda em MODO RELATORIO. Ele nunca fica"
+            echo "> vermelho, mesmo achando falhas criticas, porque o objetivo aqui e"
+            echo "> ensinar. Em um projeto real, os achados criticos deveriam"
+            echo "> bloquear o deploy."
+          } >> $GITHUB_STEP_SUMMARY
+
+          echo "Arquivos recebidos dos estagios anteriores:"
+          find todos-relatorios -type f 2>/dev/null | head -30 || true

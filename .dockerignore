@@ -1,0 +1,8 @@
+# Arquivos que NAO devem ir para dentro da imagem Docker
+target/
+relatorios/
+.git/
+.github/
+*.md
+scripts/
+k8s/

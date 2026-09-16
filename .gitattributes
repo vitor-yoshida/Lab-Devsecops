@@ -1,0 +1,21 @@
+# =============================================================================
+#  .gitattributes - define como o Git trata as quebras de linha dos arquivos.
+#
+#  Por que isso importa: o Windows e o Linux marcam o fim da linha de um jeito
+#  diferente. Se o script .sh for salvo no formato do Windows, o Linux nao
+#  consegue executa-lo e mostra um erro confuso ("bad interpreter").
+#  As regras abaixo evitam esse problema classico.
+# =============================================================================
+
+# Padrao: o Git decide, normalizando para o formato do Linux no repositorio
+* text=auto
+
+# Scripts de Linux/macOS: SEMPRE no formato do Linux (LF)
+*.sh text eol=lf
+
+# Scripts do Windows: sempre no formato do Windows (CRLF)
+*.ps1 text eol=crlf
+
+# Arquivos que nao devem ser tocados
+*.png binary
+*.jar binary

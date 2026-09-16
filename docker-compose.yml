@@ -1,0 +1,69 @@
+# =============================================================================
+#  docker-compose.yml - sobe o laboratorio inteiro com um comando so.
+#
+#  Servicos:
+#    app-vulneravel -> nossa aplicacao Java
+#    wapiti         -> o scanner DAST que ataca a aplicacao
+#
+#  Os dois ficam na MESMA rede Docker ("rede-lab"). Por isso o Wapiti
+#  consegue chamar a aplicacao pelo nome "app-vulneravel", e isso funciona
+#  igual no Windows, no macOS e no Linux.
+# =============================================================================
+services:
+
+  app-vulneravel:
+    build: .
+    image: app-vulneravel:latest
+    container_name: app-vulneravel
+    ports:
+      # esquerda = porta no seu computador | direita = porta dentro do container
+      - "8080:8080"
+    networks:
+      - rede-lab
+    healthcheck:
+      # Pergunta de 5 em 5 segundos se a aplicacao ja respondeu
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  wapiti:
+    # Imagem oficial do Python. Instalamos o Wapiti na hora, assim voce nao
+    # depende de nenhuma imagem de terceiros.
+    image: python:3.11-slim
+    container_name: wapiti-scanner
+    # "profiles" faz este servico NAO subir junto com o "docker compose up".
+    # Ele so roda quando voce pedir: docker compose --profile dast run --rm wapiti
+    profiles:
+      - dast
+    depends_on:
+      app-vulneravel:
+        condition: service_healthy
+    networks:
+      - rede-lab
+    volumes:
+      # A pasta relatorios do seu computador aparece como /relatorios no container
+      - ./relatorios:/relatorios
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo "==> Instalando o Wapiti (pode levar 1 a 2 minutos)..."
+        pip install --quiet --no-cache-dir wapiti3
+        echo "==> Iniciando a varredura DAST contra http://app-vulneravel:8080"
+        wapiti \
+          --url http://app-vulneravel:8080/ \
+          --scope folder \
+          --module sql,xss,exec,file,backup,csp,http_headers \
+          --format html \
+          --output /relatorios/wapiti \
+          --max-scan-time 240 \
+          --flush-session \
+          --verbose 1
+        echo "==> Varredura concluida. Relatorio em relatorios/wapiti/"
+
+networks:
+  rede-lab:
+    driver: bridge

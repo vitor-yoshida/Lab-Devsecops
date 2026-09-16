@@ -1,0 +1,51 @@
+# =============================================================================
+#  .gitignore - lista de arquivos que o Git deve IGNORAR.
+#  O que estiver aqui nunca sobe para o GitHub.
+# =============================================================================
+
+# ============================================================
+#  DOCUMENTO INTERNO DO APRESENTADOR - NAO VERSIONAR
+#  O CheatSheet contem o roteiro completo da apresentacao.
+#  Ele e de uso pessoal de quem conduz o laboratorio e NUNCA
+#  deve ser enviado para o repositorio.
+# ============================================================
+CheatSheet.md
+cheatsheet.md
+CHEATSHEET.md
+
+# ---- Java / Maven ----
+target/
+*.class
+*.jar
+*.war
+dependency-reduced-pom.xml
+.mvn/
+mvnw
+mvnw.cmd
+
+# ---- Relatorios gerados pelas ferramentas de seguranca ----
+relatorios/
+*.sbom.json
+sbom.cyclonedx.json
+spotbugsXml.xml
+spotbugs.html
+.wapiti/
+
+# ---- Editores e IDEs ----
+.idea/
+*.iml
+.vscode/
+*.swp
+.project
+.classpath
+.settings/
+
+# ---- Sistema operacional ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Segredos (nunca versione credenciais de verdade) ----
+.env
+*.pem
+*.key

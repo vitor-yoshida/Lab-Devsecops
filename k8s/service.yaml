@@ -1,0 +1,22 @@
+# =============================================================================
+#  service.yaml - publica a aplicacao para que alguem consiga acessa-la.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-vulneravel
+  namespace: default
+  labels:
+    app: app-vulneravel
+spec:
+  # RUIM: NodePort abre uma porta em TODOS os nos do cluster, exposta
+  #       diretamente para a rede. Sem firewall, vira porta de entrada.
+  # CERTO: usar ClusterIP + Ingress com HTTPS na frente.
+  type: NodePort
+  selector:
+    app: app-vulneravel
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080

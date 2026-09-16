@@ -1,0 +1,108 @@
+# =============================================================================
+#  deployment.yaml - diz ao Kubernetes COMO rodar nossa aplicacao.
+#
+#  Este arquivo e um CATALOGO DE MAS PRATICAS, criado de proposito para que o
+#  Kubescape (estagio 3 do pipeline) tenha bastante coisa para reclamar.
+#
+#  Legenda dos comentarios:
+#     RUIM  -> o erro que esta aqui
+#     CERTO -> como deveria ser em producao
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-vulneravel
+  namespace: default          # RUIM: usar o namespace "default" mistura tudo.
+                              # CERTO: criar um namespace proprio da aplicacao.
+  labels:
+    app: app-vulneravel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app-vulneravel
+  template:
+    metadata:
+      labels:
+        app: app-vulneravel
+    spec:
+      # RUIM: o token de acesso a API do Kubernetes e montado dentro do pod.
+      #       Se invadirem a aplicacao, usam esse token para atacar o cluster.
+      # CERTO: automountServiceAccountToken: false
+      automountServiceAccountToken: true
+
+      # RUIM: o pod usa a rede da maquina hospedeira, enxergando todo o trafego.
+      # CERTO: remover esta linha (o padrao ja e a rede isolada do pod).
+      hostNetwork: true
+
+      # RUIM: o pod enxerga os processos da maquina hospedeira.
+      # CERTO: remover esta linha.
+      hostPID: true
+
+      containers:
+        - name: app-vulneravel
+
+          # RUIM: a tag "latest" muda sem aviso; voce nunca sabe o que subiu.
+          # CERTO: fixar a versao, ex.: app-vulneravel:1.0.0
+          image: app-vulneravel:latest
+
+          # RUIM: "Always" combinado com "latest" pode puxar uma imagem
+          #       diferente a cada reinicio do pod.
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+
+          # RUIM: senha e chave de API em texto puro dentro do manifesto.
+          #       Quem tiver acesso ao repositorio le tudo.
+          # CERTO: usar Secret do Kubernetes (ou um cofre como o Vault) e
+          #        referenciar com valueFrom.secretKeyRef
+          env:
+            - name: SENHA_BANCO
+              value: "SenhaSuperSecreta123"
+            - name: CHAVE_API
+              value: "sk-lab-1234567890abcdef"
+
+          # RUIM: praticamente todas as protecoes desligadas.
+          # CERTO seria exatamente o contrario:
+          #   securityContext:
+          #     privileged: false
+          #     runAsNonRoot: true
+          #     runAsUser: 1001
+          #     allowPrivilegeEscalation: false
+          #     readOnlyRootFilesystem: true
+          #     capabilities:
+          #       drop: ["ALL"]
+          securityContext:
+            privileged: true                 # RUIM: container com poder de root no no
+            runAsUser: 0                     # RUIM: roda como root
+            runAsNonRoot: false              # RUIM: permite rodar como root
+            allowPrivilegeEscalation: true   # RUIM: permite ganhar mais privilegio
+            readOnlyRootFilesystem: false    # RUIM: atacante pode gravar arquivos
+            capabilities:
+              add:
+                - SYS_ADMIN                  # RUIM: poder quase total no kernel
+                - NET_ADMIN
+
+          # RUIM: sem limite de CPU e memoria. Um bug (ou um ataque) derruba
+          #       o servidor inteiro consumindo todos os recursos.
+          # CERTO:
+          #   resources:
+          #     requests: { cpu: "100m", memory: "256Mi" }
+          #     limits:   { cpu: "500m", memory: "512Mi" }
+
+          # RUIM: sem livenessProbe/readinessProbe o Kubernetes nao percebe
+          #       quando a aplicacao trava.
+
+          volumeMounts:
+            # RUIM: monta a RAIZ do sistema de arquivos da maquina dentro do
+            #       container. Quem invadir o pod le e escreve no servidor.
+            # CERTO: nao usar hostPath; usar volumes gerenciados (PVC).
+            - name: disco-do-servidor
+              mountPath: /host
+
+      volumes:
+        - name: disco-do-servidor
+          hostPath:
+            path: /
+            type: Directory
